@@ -1,3 +1,16 @@
+## Requirements
+Hardware:
+A GPU is essential.
+
+The following executables are required:
+
+- Python libraries: PyTorch, numpy, scipy, astropy
+- For creation of blank MS [makems](https://git.astron.nl/ro/lofar/-/blob/master/CEP/MS/src/makems.cc)
+- For generating data, calibration, influence function calculation (use CUDA build) [sagecal](https://github.com/nlesc-dirac/sagecal)
+
+After building the above software, edit ```./generate_data.py``` to point to their correct locations in your installation.
+
+## Running
 Common settings:
 
 ```
