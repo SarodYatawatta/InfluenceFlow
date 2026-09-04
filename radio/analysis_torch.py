@@ -1,0 +1,239 @@
+#! /usr/bin/env python
+import math,sys,uuid,argparse
+import numpy as np
+import numpy.matlib
+import torch
+from torch.multiprocessing import Pool,Process,set_start_method
+from calibration_tools import *
+import casa_io
+
+# (try to) use a GPU for computation?
+use_cuda=True
+if use_cuda and torch.cuda.is_available():
+  mydevice=torch.device('cuda')
+else:
+  mydevice=torch.device('cpu')
+
+def process_chunk(ncal,XX,XY,YX,YY,Ct,J,Hadd,T,Ts,B,N,loop_in_r,fullpol):
+        ts=ncal*T
+        print('%d %d %d'%(ts,Ts,ncal))
+        R=torch.zeros((2*B*T,2),dtype=torch.cfloat,device=mydevice)
+        R[0:2*B*T:2,0]=XX[ts*B:ts*B+B*T]
+        R[0:2*B*T:2,1]=XY[ts*B:ts*B+B*T]
+        R[1:2*B*T:2,0]=YX[ts*B:ts*B+B*T]
+        R[1:2*B*T:2,1]=YY[ts*B:ts*B+B*T]
+       
+        # D_Jgrad K x 4Nx4N tensor
+        H=Hessianres_torch(R,Ct[:,ts*B:ts*B+B*T],J[:,ncal*2*N:ncal*2*N+2*N],N,mydevice)
+        H+=Hadd
+       
+        # set to zero
+        XX[ts*B:ts*B+B*T]=0
+        XY[ts*B:ts*B+B*T]=0
+        YX[ts*B:ts*B+B*T]=0
+        YY[ts*B:ts*B+B*T]=0
+       
+        if loop_in_r:
+          for r in range(8):
+            # dJ: K x 4NxB tensor
+            dJ=Dsolutions_torch(Ct[:,ts*B:ts*B+B*T],J[:,ncal*2*N:ncal*2*N+2*N],N,H,r,mydevice)
+            # dR: 4B x B (sum up all K)
+            dR=Dresiduals_torch(Ct[:,ts*B:ts*B+B*T],J[:,ncal*2*N:ncal*2*N+2*N],N,dJ,0,r,mydevice) # 0 for not adding I to dR
+            # find mean value over columns
+            dR11=torch.mean(dR[0:4*B:4],dim=0)
+            dR11=torch.squeeze(dR11.repeat(1,T))
+            XX[ts*B:ts*B+B*T] +=dR11
+            dR11=torch.mean(dR[3:4*B:4],dim=0)
+            dR11=torch.squeeze(dR11.repeat(1,T))
+            YY[ts*B:ts*B+B*T] +=dR11
+            if fullpol:
+              dR11=torch.mean(dR[1:4*B:4],dim=0)
+              dR11=torch.squeeze(dR11.repeat(1,T))
+              XY[ts*B:ts*B+B*T] +=dR11
+              dR11=torch.mean(dR[2:4*B:4],dim=0)
+              dR11=torch.squeeze(dR11.repeat(1,T))
+              YX[ts*B:ts*B+B*T] +=dR11
+        else:
+          # dJ: 8 x K x 4NxB tensor
+          dJ=Dsolutions_r_torch(Ct[:,ts*B:ts*B+B*T],J[:,ncal*2*N:ncal*2*N+2*N],N,H,mydevice)
+          # dR: 8 x 4B x B (sum up all K) : complex
+          dR=Dresiduals_r_torch(Ct[:,ts*B:ts*B+B*T],J[:,ncal*2*N:ncal*2*N+2*N],N,dJ,0,mydevice) # 0 for not adding I to dR
+          # create 8 (=r) times 4 (XX, XY, YX, YY)  matrices of B x B and find eigenvalues
+          # find mean value of eigenvalues over r
+          for r in range(8):
+            dR11=dR[r,0:4*B:4]
+            Eig,_=torch.linalg.eig(dR11)
+            XX[ts*B:ts*B+B*T] += torch.squeeze(Eig.repeat(1,T))
+            dR11=dR[r,3:4*B:4]
+            Eig,_=torch.linalg.eig(dR11)
+            YY[ts*B:ts*B+B*T] += torch.squeeze(Eig.repeat(1,T))
+            dR11=dR[r,1:4*B:4]
+            Eig,_=torch.linalg.eig(dR11)
+            XY[ts*B:ts*B+B*T] += torch.squeeze(Eig.repeat(1,T))
+            dR11=dR[r,2:4*B:4]
+            Eig,_=torch.linalg.eig(dR11)
+            YX[ts*B:ts*B+B*T] += torch.squeeze(Eig.repeat(1,T))
+
+        del R,H,dJ,dR,dR11
+
+ 
+def analysis_uvwdir_loop(skymodel,clusterfile,MS,rhofile,solutionsfile,z_solfile,flow=110,fhigh=170,ra0=0,dec0=math.pi/2,tslots=10,Nparallel=4):
+    # ra0,dec0: phase center (rad)
+    # tslots: -t option
+    # Nparallel=number of parallel jobs to use
+
+    # alpha: spatial constraint regularization parameter (also read from rhofile)
+    flow=flow*1e6
+    fhigh=fhigh*1e6
+   
+    # if 1, IQUV, else only I
+    fullpol=0
+    loop_in_r=False# use 8 blocks instead of looping
+    
+    # read solutions file (also get the frequency(MHz)) J: Kx2N Nt x 2 (2Nx2 blocks Nt times)
+    freq,J,N,K1=readsolutions(solutionsfile,returnfull=True)
+
+    # read Z (global) solutions to get metadata for consensus polynomial
+    if z_solfile is not None:
+       N,f0,Ne,K1,Z1=read_global_solutions(z_solfile)
+    else:
+        f0=freq
+        Ne=1
+        Z1=None
+    
+    # N: stations
+    # Ne: consensus poly terms, same as -P parameter in sagecal
+    # baselines
+    B=int(N*(N-1)/2)
+    # reference freq (for consensus polynomial)
+    assert(f0>=flow and f0<=fhigh) # mean of all freqs
+    #%%%%%%%%%%%%%%%%%% consensus polynomial info
+    if z_solfile is None:
+       Nf=1
+    else:
+       Nf=8 # no. of freqs: make sure to match all data
+    f=np.linspace(flow,fhigh,Nf)
+    polytype=1 # 0: ordinary, 1: Bernstein
+    
+    # read sky model Ct: Kx T x 4 (each row XX,XY,YX,YY)
+    K,Ct=skytocoherencies_torch(skymodel,clusterfile,MS,N,freq,ra0,dec0,mydevice)
+    assert(K==K1)
+    
+    # ADMM rho, per each direction, scale later
+    # scale rho linearly with sI
+    if rhofile is not None:
+        rho_spectral,rho_spatial=read_rho(rhofile,K)
+    else:
+        rho_spectral=None
+        rho_spatial=None
+
+    # read u,v,w,xx(re,im), xy(re,im) yx(re,im) yy(re,im)
+    _,_,_,XX,XY,YX,YY=casa_io.read_corr(MS,colname='MODEL_DATA')
+    # how many timeslots to use per calibration (-t option)
+    T=tslots
+    Ts=int(XX.shape[0]//(B*T))
+
+    # check this agrees with solutions
+    nx,ny=J[0].shape
+    if nx<2*N*Ts:
+     print('Error: solutions size does not match with data size')
+     exit
+
+    
+    # which frequency index to work with
+    fidx=np.argmin(np.abs(f-freq))
+    
+    # addition to Hessian
+    Hadd=np.zeros((K,4*N,4*N),dtype=np.float32)
+
+    # map to torch
+    XX=torch.from_numpy(XX).to(mydevice)
+    XY=torch.from_numpy(XY).to(mydevice)
+    YX=torch.from_numpy(YX).to(mydevice)
+    YY=torch.from_numpy(YY).to(mydevice)
+    Hadd=torch.from_numpy(Hadd).to(mydevice)
+    J=torch.from_numpy(J).to(mydevice)
+    if z_solfile is not None:
+       for ci in range(K):
+         # note: F is dependent on rho when alpha!=0 
+         # example: making F=rand(2N,2N) makes performance worse
+         alpha=rho_spatial[ci]
+         F,P=consensus_poly(Ne,N,f,f0,fidx,polytype=polytype,rho=rho_spectral[ci],alpha=alpha)
+         FF=np.matmul(F.transpose(),F)
+         if alpha>0.0:
+           PP=np.matmul(P.transpose(),P)
+           H11=0.5*rho_spectral[ci]*FF+0.5*alpha*rho_spectral[ci]*rho_spectral[ci]*PP
+           H12=0.5*FF+0.5*alpha*rho_spectral[ci]*PP
+           H21=H12
+           H22=-0.5/rho_spectral[ci]*(np.eye(2*N)-FF)+0.5*alpha*PP
+           Htilde=H11-np.matmul(H12,np.matmul(np.linalg.pinv(H22),H21))
+           Hadd[ci]=torch.from_numpy(np.kron(np.eye(2),Htilde)).to(mydevice)
+         else:
+           Hadd[ci]=torch.from_numpy(0.5*rho_spectral[ci]*np.kron(np.eye(2),np.matmul(FF,np.eye(2*N)+np.matmul(np.linalg.pinv(np.eye(2*N)-FF),FF)))).to(mydevice)
+    else:
+        Hadd=0
+
+    # create pool if Nparallel>1
+    if Nparallel>1:
+      XX.share_memory_()
+      XY.share_memory_()
+      YX.share_memory_()
+      YY.share_memory_()
+
+      pool=Pool(processes=Nparallel)
+      argin=[(ci,XX,XY,YX,YY,Ct,J,Hadd,T,Ts,B,N,loop_in_r,fullpol) for ci in range(Ts)]
+      pool.starmap(process_chunk,argin)
+      pool.close()
+      pool.join()
+    else: # loop over Ts
+      for ci in range(Ts):
+         process_chunk(ci,XX,XY,YX,YY,Ct,J,Hadd,T,Ts,B,N,loop_in_r,fullpol)
+
+    # scale by 1 (as we only write the eigenvalues)
+    scalefactor=1
+
+    XX=XX*scalefactor
+    XY=XY*scalefactor
+    YX=YX*scalefactor
+    YY=YY*scalefactor
+    XX=XX.cpu().numpy()
+    XY=XY.cpu().numpy()
+    YX=YX.cpu().numpy()
+    YY=YY.cpu().numpy()
+    casa_io.write_corr(MS,XX,XY,YX,YY,colname='CORRECTED_DATA')
+
+
+def init_parser():
+    parser.add_argument('--sky_model', default=None, type=str, help='Sky model')
+    parser.add_argument('--cluster_file', default=None, type=str, help='Cluster file')
+    parser.add_argument('--MS', default=None, type=str, help='MS')
+    parser.add_argument('--rho_file', default=None, type=str, help='ADMM rho file')
+    parser.add_argument('--solution_file', default=None, type=str, help='Solution file')
+    parser.add_argument('--z_file', default=None, type=str, help='Global solution file')
+    parser.add_argument('--freq_low', default=120, type=float, help='Low frequency (MHz)')
+    parser.add_argument('--freq_high', default=121, type=float, help='High frequency (MHz)')
+    parser.add_argument('--ra', default=0, type=float, help='RA')
+    parser.add_argument('--dec', default=math.pi/2, type=float, help='Dec')
+    parser.add_argument('--time_slots', default=1, type=int, help='Number of time samples (solutions)')
+    parser.add_argument('--jobs', default=1, type=int, help='Number of parallel jobs')
+
+if __name__ == '__main__':
+  # setup multiprocessing
+  try:
+    set_start_method('spawn')
+  except RuntimeError:
+    pass
+
+  parser = argparse.ArgumentParser(description="Calculate influence function",
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+  init_parser()
+  args = parser.parse_args()
+
+  # args skymodel clusterfile MS rhofile solutionsfile z_solutions_file freq_low(MHz) freq_high(MHz) ra0 dec0 tslots parallel_jobs
+  if args.sky_model is not None and args.cluster_file is not None and args.MS is not None \
+          and args.solution_file is not None:
+      analysis_uvwdir_loop(args.sky_model,args.cluster_file,args.MS,args.rho_file,args.solution_file,args.z_file,args.freq_low,args.freq_high,args.ra,args.dec,args.time_slots,args.jobs)
+  else:
+      parser.print_help()
+  exit()
