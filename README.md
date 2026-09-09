@@ -1,5 +1,5 @@
 # InfluenceFlow
-Normalizing flows using influence functions. Code to accompany the paper **Recovering weak signals with normalizing flows** (under review).
+Normalizing flows using influence functions. Code to accompany the paper [Recovering weak signals with normalizing flows](https://arxiv.org/abs/2609.06382).
 
 ## Novelty and significance
 
@@ -11,4 +11,4 @@ See directory './linear'
 ## Radio interferometric model
 See directory './radio'
 
-vr  4 sep 2026 10:14:16 CEST
+wo  9 sep 2026  9:08:25 CEST
