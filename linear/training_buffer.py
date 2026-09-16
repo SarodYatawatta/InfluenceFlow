@@ -16,8 +16,6 @@ class TrainingBuffer(object):
         self.r_= np.zeros((self.mem_size, self.N), dtype=np.float32)
         # log(Eigenvalues): Nx1
         self.log_eig_= np.zeros((self.mem_size, self.N), dtype=np.float32)
-        # Influence function: NxN
-        self.F_= np.zeros((self.mem_size, self.N, self.N), dtype=np.float32)
         # metadata
         self.metadata_= np.zeros((self.mem_size, self.n_meta), dtype=np.float32)
 
@@ -31,11 +29,10 @@ class TrainingBuffer(object):
 
         self.filename='databuffer.npy' # for saving object
 
-    def store_observation(self, r, log_eig, F, metadata):
+    def store_observation(self, r, log_eig, metadata):
         index = self.mem_cntr % self.mem_size
         self.r_[index] = r
         self.log_eig_[index] = log_eig
-        self.F_[index] = F
         self.metadata_[index] = metadata
         self.mem_cntr += 1
 
@@ -62,13 +59,12 @@ class TrainingBuffer(object):
         self.norm_fact_=True
 
     def sample_buffer(self, batch_size, normalize=False):
-        # return r, log_eig, F as separate numpy arrays
+        # return r, log_eig, as separate numpy arrays
         max_mem = min(self.mem_cntr, self.mem_size)
         batch = np.random.choice(max_mem, batch_size, replace=False)
 
         r= self.r_[batch]
         log_eig= self.log_eig_[batch]
-        F = self.F_[batch]
         metadata = self.metadata_[batch]
 
         if normalize:
@@ -76,7 +72,7 @@ class TrainingBuffer(object):
             r=(r-self.r_mu_)/self.r_std_
             metadata=(metadata-self.metadata_mu_)/self.metadata_std_
 
-        return r,log_eig,F,metadata
+        return r,log_eig,metadata
 
     def resize(self,new_size):
         if new_size < self.mem_size:
@@ -94,10 +90,6 @@ class TrainingBuffer(object):
            metadata=np.zeros((new_size,self.metadata_.shape[1]), dtype=np.float32)
            metadata[:self.metadata_.shape[0],:self.metadata_.shape[1]]=self.metadata_
            self.metadata_=metadata
-           # Influence function: NxN
-           F=np.zeros((new_size,self.F_.shape[1],self.F_.shape[2]), dtype=np.float32)
-           F[:self.F_.shape[0],:self.F_.shape[1],:self.F_.shape[2]]=self.F_
-           self.F_=F
 
            self.mem_size=new_size
 
@@ -113,7 +105,6 @@ class TrainingBuffer(object):
         self.r_[r_filled:r_filled+r1_filled]=buffer.r_[:r1_filled]
         self.log_eig_[r_filled:r_filled+r1_filled]=buffer.log_eig_[:r1_filled]
         self.metadata_[r_filled:r_filled+r1_filled]=buffer.metadata_[:r1_filled]
-        self.F_[r_filled:r_filled+r1_filled]=buffer.F_[:r1_filled]
         self.mem_cntr+=r1_filled
 
     def save_checkpoint(self,filename=None):
@@ -139,7 +130,6 @@ class TrainingBuffer(object):
           self.mem_cntr=temp.mem_cntr
           self.r_=temp.r_
           self.log_eig_=temp.log_eig_
-          self.F_=temp.F_
           self.metadata_=temp.metadata_
 
     def reset(self):

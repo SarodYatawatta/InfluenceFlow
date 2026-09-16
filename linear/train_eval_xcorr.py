@@ -119,7 +119,7 @@ def evaluate_model(model,test_buffer):
    dot_prod=0
    model.eval()
    with torch.no_grad():
-      y,log_eig,J,metadata=test_buffer.sample_buffer(n_m_eval,normalize=do_normalize)
+      y,log_eig,metadata=test_buffer.sample_buffer(n_m_eval,normalize=do_normalize)
       y=torch.tensor(y).to(mydevice)
       log_eig=torch.tensor(log_eig).to(mydevice)
       metadata=torch.tensor(metadata).to(mydevice)
@@ -155,13 +155,10 @@ for epoch in range(1):
          neg_eigs=torch.sum(eigs<EPS)
          # eigs > 0 for possible invertible map, so set all -ve eigenvalues to ~0
          eigs[eigs<EPS]=EPS
-         # normalize (after finding eigenvalues)
-         J=J/torch.linalg.matrix_norm(J)
-         J=J.numpy()
          metadata=enm.metadata().detach().cpu().numpy()
          log_eig=torch.log(eigs+log_eig_eps).numpy()
          # make sure design matrix has full rank, no check done here
-         buffer.store_observation(y,log_eig,J,metadata)
+         buffer.store_observation(y,log_eig,metadata)
       buffer.save_checkpoint('buffer_'+str(epoch)+'.npy')
       for cj in range(n_eval):
          enm.reset()
@@ -173,12 +170,9 @@ for epoch in range(1):
          eigs,_=torch.linalg.eig(J)
          eigs=torch.real(eigs)
          eigs[eigs<EPS]=EPS
-         # normalize (after finding eigenvalues)
-         J=J/torch.linalg.matrix_norm(J)
-         J=J.numpy()
          metadata=enm.metadata().detach().cpu().numpy()
          log_eig=torch.log(eigs+log_eig_eps).numpy()
-         test_buffer.store_observation(y,log_eig,J,metadata)
+         test_buffer.store_observation(y,log_eig,metadata)
       test_buffer.save_checkpoint('test_buffer_'+str(epoch)+'.npy')
    else:
       # load saved buffer
@@ -208,11 +202,11 @@ for epoch in range(1):
 
    # train using buffer 
    for ci in range(n_iter):
-      y,log_eig,J,metadata=buffer.sample_buffer(batch_size,normalize=do_normalize)
+      y,log_eig,metadata=buffer.sample_buffer(batch_size,normalize=do_normalize)
       y=torch.tensor(y).to(mydevice)
       log_eig=torch.tensor(log_eig).to(mydevice)
       metadata=torch.tensor(metadata).to(mydevice)
-      n_batch=J.shape[0]
+      n_batch=y.shape[0]
       xtilde, log_px, _, _=bd.sample(y,metadata,reparameterize=True)
 
       if not initial_training:
@@ -267,7 +261,7 @@ for epoch in range(1):
    bd.eval()
    import matplotlib.pyplot as plt
    for ci in range(n_eval):
-      y,log_eig,J,metadata=test_buffer.sample_buffer(1,normalize=do_normalize)
+      y,log_eig,metadata=test_buffer.sample_buffer(1,normalize=do_normalize)
       y=torch.tensor(y).to(mydevice)
       log_eig=torch.tensor(log_eig).to(mydevice)
       metadata=torch.tensor(metadata).to(mydevice)
