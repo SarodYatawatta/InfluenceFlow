@@ -5,20 +5,11 @@ from autograd_tools import *
 from covariance_generator import covariance_generator
 from grf import generate_2d_grf
 
-
-# (try to) use a GPU for computation?
-use_cuda=True
-if use_cuda and torch.cuda.is_available():
-  mydevice=torch.device('cuda')
-else:
-  mydevice=torch.device('cpu')
-
-
 class ElasticNetModel:
     # solve
     # arg min_x || y - Ax ||^2 + \lambda1 (||x||_2)^2 + \lambda2 ||x||_1
     # A: tall matrix NxM, N>M
-    def __init__(self,N=9,M=5,lambda1=0.001,lambda2=0.001,SNR=10,seed=None):
+    def __init__(self,N=9,M=5,lambda1=0.001,lambda2=0.001,SNR=10,seed=None,device=None):
         self.N=N
         self.M=M
         self.lambda1=lambda1
@@ -29,22 +20,28 @@ class ElasticNetModel:
         if self.seed is not None:
             torch.manual_seed(self.seed)
             np.random.seed(self.seed)
+        if device is None:
+            device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu"
+            )
+
+        self.device = device
 
         # create fixed base distribution parameters
         # (root) covariance (use Cholesky factor)
         C=covariance_generator(self.N)
-        self.u_C=C.to(mydevice)
+        self.u_C=C.to(self.device)
         self.u_Cf=torch.linalg.cholesky(self.u_C)
         Ns=int(np.sqrt(N))
         if (N==Ns*Ns):
             self.is_sqr=True
             # bias: Gaussian random field of sqrt(N) x sqrt(N)
             bias=generate_2d_grf(size=Ns,seed=22,Hurst=2).flatten()
-            self.u_b=torch.FloatTensor(bias).to(mydevice)*0.02
+            self.u_b=torch.FloatTensor(bias).to(self.device)*0.02
         else:
             self.is_sqr=False
             # bias: Gaussian vector
-            self.u_b=torch.randn(self.N).to(mydevice)*0.1
+            self.u_b=torch.randn(self.N).to(self.device)*0.1
         self.A=None
         self.x0=None
         self.y0=None
@@ -59,14 +56,14 @@ class ElasticNetModel:
 
     def reset(self):
         # create a new simulation (matrix can lose rank)
-        self.A=torch.randn(self.N,self.M,dtype=torch.float32,requires_grad=False,device=mydevice)#+np.sqrt(self.N)*torch.eye(self.N,self.M,dtype=torch.float32,requires_grad=False,device=mydevice)
+        self.A=torch.randn(self.N,self.M,dtype=torch.float32,requires_grad=False,device=self.device)#+np.sqrt(self.N)*torch.eye(self.N,self.M,dtype=torch.float32,requires_grad=False,device=self.device)
         # use U[0,1] for parameters so that E{x} != 0
-        self.x0=torch.rand(self.M,dtype=torch.float32,requires_grad=False,device=mydevice)
+        self.x0=torch.rand(self.M,dtype=torch.float32,requires_grad=False,device=self.device)
         self.y0=torch.matmul(self.A,self.x0)
 
     def run(self):
         # run the simulation (add noise from base distribution)
-        n=torch.randn(self.N,dtype=torch.float32,requires_grad=False,device=mydevice)
+        n=torch.randn(self.N,dtype=torch.float32,requires_grad=False,device=self.device)
         # generate noise from base distribution: scale such that
         # adding about 400 realizations would show u_b
         if self.is_sqr:
@@ -84,7 +81,7 @@ class ElasticNetModel:
     def fit(self):
         # solve for the unknowns
         # parameters, initialized to zero
-        self.x=torch.zeros(self.M,requires_grad=True,device=mydevice)
+        self.x=torch.zeros(self.M,requires_grad=True,device=self.device)
 
         self.opt = LBFGSNew([self.x],history_size=7,max_iter=10,line_search_fn=True,batch_mode=False)
 
@@ -103,14 +100,14 @@ class ElasticNetModel:
     def calculate_influence(self):
         # find Jacobian of the transform
         # find Jacobian of model = A
-        jac=jacobian(torch.matmul(self.A,self.x),self.x).to(mydevice)
+        jac=jacobian(torch.matmul(self.A,self.x),self.x).to(self.device)
         # right hand term = -2 A^T
         df_dx=(lambda yi: gradient(self.lossfunction(self.A,yi,self.x,self.lambda1,self.lambda2), self.x))
         # no need to pass one-hot vectors, because we calculate d( )/dy^T in one go
         e=torch.ones_like(self.y) # all ones
         ll=torch.autograd.functional.jacobian(df_dx,e)
 
-        mm=torch.zeros_like(ll).to(mydevice)
+        mm=torch.zeros_like(ll).to(self.device)
         # copy ll because it is modified
         for i in range(self.N):
             ll2=ll[:,i].clone().detach()
@@ -125,7 +122,7 @@ class ElasticNetModel:
         #AtAi=torch.linalg.pinv(torch.matmul(self.A.t(),self.A))
         #Atilde=-torch.matmul(self.A,torch.matmul(AtAi,self.A.t()))
         #print('A')
-        #print(torch.eye(self.N).to(mydevice)-Atilde)
+        #print(torch.eye(self.N).to(self.device)-Atilde)
         #print('F')
         #print(self.F)
 

@@ -4,14 +4,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Normal,MultivariateNormal
 
-# (try to) use a GPU for computation?
-use_cuda=True
-if use_cuda and torch.cuda.is_available():
-  mydevice=torch.device('cuda')
-else:
-  mydevice=torch.device('cpu')
-
-
 def bunch_layers(n_layers, n_dim):
     '''
     helper function to create n_layers, n_dim dimension
@@ -27,8 +19,12 @@ class BaseDist(nn.Module):
     x ~ p_X(x) base distribution 
     x: Nx1
     '''
-    def __init__(self,N,n_metadata,n_hidden=32,depth=3,epsilon=1.0,dropout=True):
+    def __init__(self,N,n_metadata,n_hidden=32,depth=3,epsilon=1.0,dropout=True,device=None):
         super(BaseDist,self).__init__()
+        if device is None:
+            device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu"
+            )
         self.N=N
         # variance = epsilon+sigma
         self.eps=epsilon
@@ -62,10 +58,10 @@ class BaseDist(nn.Module):
         self.cov_diag=True
         if self.cov_diag:
            self.fclogsigma=nn.Linear(n_hidden,N)
-           self.scalar=torch.tensor(self.eps).to(mydevice)
+           self.scalar=torch.tensor(self.eps,device=device)
         else:
            self.fclogsigma=nn.Linear(n_hidden,N*(N+1)//2)
-           self.scalar=self.eps*torch.eye(self.N).to(mydevice)
+           self.scalar=self.eps*torch.eye(self.N,device=device)
         # initialize last layers to zero ~ getting N(0,1) dist
         nn.init.xavier_normal_(self.fcmu.weight)
         nn.init.constant_(self.fcmu.bias,0.0)
@@ -73,8 +69,6 @@ class BaseDist(nn.Module):
         nn.init.constant_(self.fclogsigma.bias,0.0)
 
         self.checkpoint_file='basedist.model'
-        self.to(mydevice)
-
 
     def _init_layer(self,layer):
         # init a single linear layer
@@ -99,7 +93,7 @@ class BaseDist(nn.Module):
             mvn=Normal(mu,sigma+self.scalar)
         else:
             batch_size=y.shape[0]
-            cov=torch.zeros(batch_size,self.N,self.N).to(mydevice)
+            cov=torch.zeros(batch_size,self.N,self.N).to(device)
             ti=torch.tril_indices(self.N,self.N)
             cov[:,ti[0],ti[1]]=sigma
             mvn=MultivariateNormal(loc=mu,scale_tril=cov+self.scalar)

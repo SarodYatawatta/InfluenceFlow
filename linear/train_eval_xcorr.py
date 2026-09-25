@@ -131,12 +131,11 @@ def evaluate_model(model,test_buffer):
    return torch.sum(sum_log_px).cpu().numpy()/(n_m_eval*n_input),dot_prod/n_m_eval
 
 for epoch in range(1):
-   enm=ElasticNetModel(N=N,M=M,seed=random_seed+epoch,SNR=1)
+   enm=ElasticNetModel(N=N,M=M,seed=random_seed+epoch,SNR=1,device=mydevice)
    # increasing depth > 4 lose covariance diagonal
-   bd=BaseDist(n_input,n_metadata=enm.metadata_size,n_hidden=n_hidden,depth=n_depth,epsilon=0.01,dropout=dropout)
+   bd=BaseDist(n_input,n_metadata=enm.metadata_size,n_hidden=n_hidden,depth=n_depth,epsilon=0.01,dropout=dropout,device=mydevice).to(mydevice)
    if load_model:
        bd.load_checkpoint()
-   total_parameters=bd.parameters()
    buffer=TrainingBuffer(n_buffer,n_input,enm.metadata_size)
    test_buffer=TrainingBuffer(n_eval,n_input,enm.metadata_size)
    if not load_buffer:
@@ -182,9 +181,8 @@ for epoch in range(1):
    if do_normalize:
       test_buffer.set_normalization(*buffer.calculate_normalization())
 
-   #optimizer=optim.Adam(total_parameters,lr=target_lr)
    # AdamW is more stable for long runs
-   optimizer=optim.AdamW(total_parameters,lr=target_lr,weight_decay=1e-5)
+   optimizer=optim.AdamW(bd.parameters(),lr=target_lr,weight_decay=1e-5)
 
    warmup_lambda=lambda step: min(1.0,(step+1)/warmup_steps)
    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup_lambda)
