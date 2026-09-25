@@ -1,6 +1,6 @@
 #! /usr/bin/env python
 import argparse
-import pickle
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +9,6 @@ import torch.optim as optim
 from elasticnet_model import ElasticNetModel
 from dnn_models import BaseDist
 from training_buffer import TrainingBuffer
-from autograd_tools import *
 
 ###
 # Use cross correlation between x ~ p(x) and y = residual
