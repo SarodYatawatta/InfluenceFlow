@@ -36,7 +36,6 @@ load_buffer=0 # if 1, load, if 0, simulate and save
 
 random_seed=1
 
-log_eig_eps=EPS
 admm_rho=1e-3 # start with a low value, and increase
 residual_error_bound=0.8 # delta, max value is 1 = y^T x /||y||||x|| per each batch (normalized by input) 
 recon_upper_bound=2 # upper bound of (-y^T x /||y||||x|| +delta), per each batch
@@ -110,7 +109,8 @@ n_hidden=args.DNN_hidden
 n_depth=args.DNN_depth
 initial_training=args.initial_training
 
-n_input=N # ideally sqrt(N)xsqrt(N) square
+n_input=N # input dim
+log_eig_size=n_input # eigenvalues to use
 
 def evaluate_model(model,test_buffer):
    n_m_eval=min(256,n_eval)
@@ -118,11 +118,11 @@ def evaluate_model(model,test_buffer):
    dot_prod=0
    model.eval()
    with torch.no_grad():
-      y,log_eig,metadata=test_buffer.sample_buffer(n_m_eval,normalize=do_normalize)
+      y,eigs,metadata=test_buffer.sample_buffer(n_m_eval,normalize=do_normalize)
       y=torch.tensor(y).to(mydevice)
-      log_eig=torch.tensor(log_eig).to(mydevice)
+      eigs=torch.clamp(torch.tensor(eigs[:,:log_eig_size]).to(mydevice),min=-10,max=10)
       metadata=torch.tensor(metadata).to(mydevice)
-      xtilde,log_px,_,_ =model.sample(y,metadata,reparameterize=False)
+      xtilde,log_px,_,_ =model.sample(y,torch.cat((metadata,eigs),dim=1),reparameterize=False)
       sum_log_px +=torch.sum(log_px,dim=1)
       # correlation or cosine similarity
       dot_prod += torch.sum(torch.bmm(y.unsqueeze(1),xtilde.unsqueeze(2)).squeeze())/(torch.mean(torch.linalg.norm(y,dim=1))*torch.mean(torch.linalg.norm(xtilde,dim=1))+EPS)
@@ -133,7 +133,7 @@ def evaluate_model(model,test_buffer):
 for epoch in range(1):
    enm=ElasticNetModel(N=N,M=M,seed=random_seed+epoch,SNR=1,device=mydevice)
    # increasing depth > 4 lose covariance diagonal
-   bd=BaseDist(n_input,n_metadata=enm.metadata_size,n_hidden=n_hidden,depth=n_depth,epsilon=0.01,dropout=dropout,device=mydevice).to(mydevice)
+   bd=BaseDist(n_input,n_metadata=enm.metadata_size+log_eig_size,n_hidden=n_hidden,depth=n_depth,epsilon=0.01,dropout=dropout,device=mydevice).to(mydevice)
    if load_model:
        bd.load_checkpoint()
    buffer=TrainingBuffer(n_buffer,n_input,enm.metadata_size)
@@ -148,15 +148,9 @@ for epoch in range(1):
          y=enm.residual().numpy()
          J=enm.F
          eigs,_=torch.linalg.eig(J)
-         # count negative eigs
-         eigs=torch.real(eigs)
-         neg_eigs=torch.sum(eigs<EPS)
-         # eigs > 0 for possible invertible map, so set all -ve eigenvalues to ~0
-         eigs[eigs<EPS]=EPS
+         eigs=torch.real(eigs).cpu().numpy()
          metadata=enm.metadata().detach().cpu().numpy()
-         log_eig=torch.log(eigs+log_eig_eps).numpy()
-         # make sure design matrix has full rank, no check done here
-         buffer.store_observation(y,log_eig,metadata)
+         buffer.store_observation(y,eigs,metadata)
       buffer.save_checkpoint('buffer_'+str(epoch)+'.npy')
       for cj in range(n_eval):
          enm.reset()
@@ -166,11 +160,9 @@ for epoch in range(1):
          y=enm.residual().numpy()
          J=enm.F
          eigs,_=torch.linalg.eig(J)
-         eigs=torch.real(eigs)
-         eigs[eigs<EPS]=EPS
+         eigs=torch.real(eigs).cpu().numpy()
          metadata=enm.metadata().detach().cpu().numpy()
-         log_eig=torch.log(eigs+log_eig_eps).numpy()
-         test_buffer.store_observation(y,log_eig,metadata)
+         test_buffer.store_observation(y,eigs,metadata)
       test_buffer.save_checkpoint('test_buffer_'+str(epoch)+'.npy')
    else:
       # load saved buffer
@@ -199,12 +191,14 @@ for epoch in range(1):
 
    # train using buffer 
    for ci in range(n_iter):
-      y,log_eig,metadata=buffer.sample_buffer(batch_size,normalize=do_normalize)
+      y,eigs,metadata=buffer.sample_buffer(batch_size,normalize=do_normalize)
       y=torch.tensor(y).to(mydevice)
-      log_eig=torch.tensor(log_eig).to(mydevice)
+      eigs=torch.tensor(eigs).to(mydevice)
+      log_eig=torch.log(torch.clamp(torch.abs(eigs),min=EPS))
+      eigs=torch.clamp(eigs[:,:log_eig_size],min=-10,max=10)
       metadata=torch.tensor(metadata).to(mydevice)
       n_batch=y.shape[0]
-      xtilde, log_px, _, _=bd.sample(y,metadata,reparameterize=True)
+      xtilde, log_px, _, _=bd.sample(y,torch.cat((metadata,eigs),dim=1),reparameterize=True)
 
       if not initial_training:
          # log likelihood = log_px - log |J|
@@ -241,7 +235,7 @@ for epoch in range(1):
       # update Lagrange multiplier
       if (not initial_training) and ci>0 and (ci%dual_update_cadence==0):
          with torch.no_grad():
-            xtilde, log_px, _, _=bd.sample(y,metadata,reparameterize=False)
+            xtilde, log_px, _, _=bd.sample(y,torch.cat((metadata,eigs),dim=1),reparameterize=False)
             denom=(torch.mean(torch.linalg.norm(y,dim=1))*torch.mean(torch.linalg.norm(xtilde,dim=1))+EPS)
             gfun = torch.sum(torch.clamp(recon_delta-torch.bmm(y.unsqueeze(1),xtilde.unsqueeze(2)).squeeze()/denom,min=0,max=recon_upper_bound).pow(2))
             gfun /= n_batch
@@ -258,11 +252,11 @@ for epoch in range(1):
    bd.eval()
    import matplotlib.pyplot as plt
    for ci in range(n_eval):
-      y,log_eig,metadata=test_buffer.sample_buffer(1,normalize=do_normalize)
+      y,eigs,metadata=test_buffer.sample_buffer(1,normalize=do_normalize)
       y=torch.tensor(y).to(mydevice)
-      log_eig=torch.tensor(log_eig).to(mydevice)
+      eigs=torch.clamp(torch.tensor(eigs[:,:log_eig_size]).to(mydevice),min=-10,max=10)
       metadata=torch.tensor(metadata).to(mydevice)
-      xtilde,_,_,_=bd.sample(y,metadata)
+      xtilde,_,_,_=bd.sample(y,torch.cat((metadata,eigs),dim=1))
       y=y.detach().cpu().numpy().squeeze()
       xtilde=xtilde.detach().cpu().numpy().squeeze()
       Ci=Ci+np.outer(xtilde,xtilde)

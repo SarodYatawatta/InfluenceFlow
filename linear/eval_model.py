@@ -57,12 +57,14 @@ n_depth=args.DNN_depth
 
 n_input=N # ideally, sqrt(N)*sqrt(N)
 Ns=int(np.sqrt(N))
+log_eig_size=n_input # eigenvalues to use
 
 enm=ElasticNetModel(N=N,M=M,seed=random_seed,SNR=1)
-bd=BaseDist(n_input,n_metadata=enm.metadata_size,n_hidden=n_hidden,depth=n_depth,epsilon=0.01,dropout=dropout)
+bd=BaseDist(n_input,n_metadata=enm.metadata_size+log_eig_size,n_hidden=n_hidden,depth=n_depth,epsilon=0.01,dropout=dropout)
 
 bd.load_checkpoint()
 bd.eval()
+bd.to(mydevice)
 
 if dropout:
    # enable dropout
@@ -91,7 +93,7 @@ draw_model=False
 if draw_model:
    model_graph = draw_graph(
     bd,
-    input_size=[(1, n_input),(1,enm.metadata_size)],
+    input_size=[(1, n_input),(1,enm.metadata_size+log_eig_size)],
     graph_name="model_architecture",
     depth=2,                        # Control layer detail nesting level
     expand_nested=True,             # Set False for high-level block diagram
@@ -116,13 +118,17 @@ for ci in range(n_eval):
    enm.fit()
    enm.calculate_influence()
    y=(enm.residual().to(mydevice)-r_mu)/r_std
+   J=enm.F
+   eigs,_=torch.linalg.eig(J)
+   eigs=torch.real(eigs).to(mydevice)
    metadata=(enm.metadata().detach().to(mydevice)-metadata_mu)/metadata_std
    y=y[None,]
    metadata=metadata[None,]
+   eigs=torch.clamp(eigs[None,:log_eig_size],min=-10,max=10)
    xbatch=0
    with torch.no_grad():
      for ns in range(n_samples):
-        xtilde, log_px, _, _=bd.sample(y,metadata,reparameterize=False)
+        xtilde, log_px, _, _=bd.sample(y,torch.cat((metadata,eigs),dim=1),reparameterize=False)
         xbatch+=xtilde.detach().cpu().numpy().squeeze()
    xbatch /= n_samples
    y=y.detach().cpu().numpy().squeeze()

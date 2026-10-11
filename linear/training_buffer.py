@@ -14,8 +14,8 @@ class TrainingBuffer(object):
 
         # residual: Nx1
         self.r_= np.zeros((self.mem_size, self.N), dtype=np.float32)
-        # log(Eigenvalues): Nx1
-        self.log_eig_= np.zeros((self.mem_size, self.N), dtype=np.float32)
+        # (Eigenvalues): Nx1
+        self.eig_= np.zeros((self.mem_size, self.N), dtype=np.float32)
         # metadata
         self.metadata_= np.zeros((self.mem_size, self.n_meta), dtype=np.float32)
 
@@ -29,10 +29,10 @@ class TrainingBuffer(object):
 
         self.filename='databuffer.npy' # for saving object
 
-    def store_observation(self, r, log_eig, metadata):
+    def store_observation(self, r, eig, metadata):
         index = self.mem_cntr % self.mem_size
         self.r_[index] = r
-        self.log_eig_[index] = log_eig
+        self.eig_[index] = eig
         self.metadata_[index] = metadata
         self.mem_cntr += 1
 
@@ -59,12 +59,12 @@ class TrainingBuffer(object):
         self.norm_fact_=True
 
     def sample_buffer(self, batch_size, normalize=False):
-        # return r, log_eig, as separate numpy arrays
+        # return r, eig, as separate numpy arrays
         max_mem = min(self.mem_cntr, self.mem_size)
         batch = np.random.choice(max_mem, batch_size, replace=False)
 
         r= self.r_[batch]
-        log_eig= self.log_eig_[batch]
+        eig= self.eig_[batch]
         metadata = self.metadata_[batch]
 
         if normalize:
@@ -72,7 +72,7 @@ class TrainingBuffer(object):
             r=(r-self.r_mu_)/self.r_std_
             metadata=(metadata-self.metadata_mu_)/self.metadata_std_
 
-        return r,log_eig,metadata
+        return r,eig,metadata
 
     def resize(self,new_size):
         if new_size < self.mem_size:
@@ -82,10 +82,10 @@ class TrainingBuffer(object):
            r=np.zeros((new_size,self.r_.shape[1]), dtype=np.float32)
            r[:self.r_.shape[0],:self.r_.shape[1]]=self.r_
            self.r_=r
-           # log(Eigenvalues): Nx1
-           log_eig=np.zeros((new_size,self.log_eig_.shape[1]), dtype=np.float32)
-           log_eig[:self.log_eig_.shape[0],:self.log_eig_.shape[1]]=self.log_eig_
-           self.log_eig_=log_eig
+           # (Eigenvalues): Nx1
+           eig=np.zeros((new_size,self.eig_.shape[1]), dtype=np.float32)
+           eig[:self.eig_.shape[0],:self.eig_.shape[1]]=self.eig_
+           self.eig_=eig
            # metadata n_meta x 1
            metadata=np.zeros((new_size,self.metadata_.shape[1]), dtype=np.float32)
            metadata[:self.metadata_.shape[0],:self.metadata_.shape[1]]=self.metadata_
@@ -103,7 +103,7 @@ class TrainingBuffer(object):
         r_filled=min(self.mem_cntr,self.mem_size)
         self.resize(r_filled+r1_filled)
         self.r_[r_filled:r_filled+r1_filled]=buffer.r_[:r1_filled]
-        self.log_eig_[r_filled:r_filled+r1_filled]=buffer.log_eig_[:r1_filled]
+        self.eig_[r_filled:r_filled+r1_filled]=buffer.eig_[:r1_filled]
         self.metadata_[r_filled:r_filled+r1_filled]=buffer.metadata_[:r1_filled]
         self.mem_cntr+=r1_filled
 
@@ -129,7 +129,7 @@ class TrainingBuffer(object):
           self.mem_size=temp.mem_size
           self.mem_cntr=temp.mem_cntr
           self.r_=temp.r_
-          self.log_eig_=temp.log_eig_
+          self.eig_=temp.eig_
           self.metadata_=temp.metadata_
 
     def reset(self):
